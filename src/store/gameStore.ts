@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 import { Board, createEmptyBoard, BOARD_ROWS, BOARD_COLS } from '../engine/board'
-import { Direction, PowerType, createTile } from '../engine/tiles'
+import { Direction, createTile } from '../engine/tiles'
 import { applySwipe, isGameOver } from '../engine/moves'
+import { applyBurningEffects, applyElectricEffects, applyTurnEndEffects } from '../engine/states'
 import { spawnNewTile, spawnInitialTiles } from '../engine/tileSpawner'
 import {
   LevelConfig,
-  LevelObjective,
   ObjectiveProgress,
   computeObjectiveProgress,
   calculateStars,
@@ -25,7 +25,6 @@ interface GameState {
   previousBoard: Board | null
   previousScore: number
 
-  // level mode
   currentLevel: LevelConfig | null
   turnCount: number
   totalMerges: number
@@ -34,8 +33,6 @@ interface GameState {
   usedPowers: boolean
   objectiveProgress: ObjectiveProgress | null
   levelStars: StarResult | null
-
-  // anti-frustration
   turnsWithoutMerge: number
 
   startFreeGame: () => void
@@ -54,6 +51,15 @@ function makeInitialBoard(level: LevelConfig): Board {
     }
   }
   return spawnInitialTiles(board, level.initialTiles?.length ? 1 : 2)
+}
+
+function getArcForLevel(level: LevelConfig | null): number {
+  if (!level) return 1
+  if (level.id <= 30) return 1
+  if (level.id <= 60) return 2
+  if (level.id <= 100) return 3
+  if (level.id <= 150) return 4
+  return 5
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -78,47 +84,21 @@ export const useGameStore = create<GameState>((set, get) => ({
   startFreeGame: () => {
     const board = spawnInitialTiles(createEmptyBoard(BOARD_ROWS, BOARD_COLS), 2)
     set({
-      mode: 'free',
-      board,
-      score: 0,
-      isGameOver: false,
-      isLevelComplete: false,
-      previousBoard: null,
-      previousScore: 0,
-      currentLevel: null,
-      turnCount: 0,
-      totalMerges: 0,
-      maxChainInLevel: 0,
-      frozenCleared: 0,
-      usedPowers: false,
-      objectiveProgress: null,
-      levelStars: null,
-      turnsWithoutMerge: 0,
+      mode: 'free', board, score: 0, isGameOver: false, isLevelComplete: false,
+      previousBoard: null, previousScore: 0, currentLevel: null,
+      turnCount: 0, totalMerges: 0, maxChainInLevel: 0, frozenCleared: 0,
+      usedPowers: false, objectiveProgress: null, levelStars: null, turnsWithoutMerge: 0,
     })
   },
 
   startLevel: (level) => {
     const board = makeInitialBoard(level)
-    const objectiveProgress = computeObjectiveProgress(
-      level.objective, board, 0, 0, 0, 0, 0
-    )
+    const objectiveProgress = computeObjectiveProgress(level.objective, board, 0, 0, 0, 0, 0)
     set({
-      mode: 'level',
-      board,
-      score: 0,
-      isGameOver: false,
-      isLevelComplete: false,
-      previousBoard: null,
-      previousScore: 0,
-      currentLevel: level,
-      turnCount: 0,
-      totalMerges: 0,
-      maxChainInLevel: 0,
-      frozenCleared: 0,
-      usedPowers: false,
-      objectiveProgress,
-      levelStars: null,
-      turnsWithoutMerge: 0,
+      mode: 'level', board, score: 0, isGameOver: false, isLevelComplete: false,
+      previousBoard: null, previousScore: 0, currentLevel: level,
+      turnCount: 0, totalMerges: 0, maxChainInLevel: 0, frozenCleared: 0,
+      usedPowers: false, objectiveProgress, levelStars: null, turnsWithoutMerge: 0,
     })
   },
 
@@ -126,21 +106,48 @@ export const useGameStore = create<GameState>((set, get) => ({
     const {
       board, score, bestScore, isGameOver: over, isLevelComplete,
       currentLevel, mode, totalMerges, maxChainInLevel, frozenCleared,
-      turnsWithoutMerge,
+      turnsWithoutMerge, turnCount,
     } = get()
 
     if (over || isLevelComplete) return
 
-    const result = applySwipe(board, direction)
-    if (!result.moved) return
+    // 1. Apply swipe
+    const swipeResult = applySwipe(board, direction)
+    if (!swipeResult.moved) return
 
-    const newTurnsWithoutMerge = result.mergesCount > 0 ? 0 : turnsWithoutMerge + 1
-    const boardWithTile = spawnNewTile(result.newBoard)
-    const gameOver = isGameOver(boardWithTile)
-    const newScore = score + result.pointsEarned
-    const newTotalMerges = totalMerges + result.mergesCount
-    const newMaxChain = Math.max(maxChainInLevel, result.chainLength)
-    const newTurnCount = get().turnCount + 1
+    let workingBoard = swipeResult.newBoard
+    let earnedPoints = swipeResult.pointsEarned
+    let mergeCount = swipeResult.mergesCount
+
+    // 2. Apply BURNING effects (destroy lowest adjacent tile)
+    const burningResult = applyBurningEffects(workingBoard, swipeResult.mergedPositions)
+    workingBoard = burningResult.newBoard
+    earnedPoints += burningResult.additionalPoints
+
+    // 3. Apply ELECTRIC cascade
+    const electricResult = applyElectricEffects(workingBoard, swipeResult.mergedPositions)
+    workingBoard = electricResult.newBoard
+    earnedPoints += electricResult.additionalPoints
+    mergeCount += electricResult.additionalMerges
+
+    // 4. Spawn new tile
+    const arc = mode === 'level' ? getArcForLevel(currentLevel) : undefined
+    const newTurnsWithoutMerge = mergeCount > 0 ? 0 : turnsWithoutMerge + 1
+    workingBoard = spawnNewTile(workingBoard, {
+      arc,
+      turnCount,
+      turnsWithoutMerge: newTurnsWithoutMerge,
+    })
+
+    // 5. Apply turn-end effects (FRAGILE countdown, INFECTED spread, reset flags)
+    const turnEndResult = applyTurnEndEffects(workingBoard)
+    workingBoard = turnEndResult.newBoard
+
+    const gameOver = isGameOver(workingBoard)
+    const newScore = score + earnedPoints
+    const newTotalMerges = totalMerges + mergeCount
+    const newMaxChain = Math.max(maxChainInLevel, swipeResult.chainLength)
+    const newTurnCount = turnCount + 1
 
     let objectiveProgress = get().objectiveProgress
     let newIsLevelComplete = false
@@ -148,13 +155,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     if (mode === 'level' && currentLevel) {
       objectiveProgress = computeObjectiveProgress(
-        currentLevel.objective,
-        boardWithTile,
-        newScore,
-        newTotalMerges,
-        newMaxChain,
-        frozenCleared,
-        newTurnCount
+        currentLevel.objective, workingBoard, newScore,
+        newTotalMerges, newMaxChain, frozenCleared, newTurnCount
       )
       newIsLevelComplete = objectiveProgress.completed
       if (newIsLevelComplete) {
@@ -163,7 +165,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     set({
-      board: boardWithTile,
+      board: workingBoard,
       score: newScore,
       bestScore: Math.max(newScore, bestScore),
       isGameOver: gameOver,
@@ -186,7 +188,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     let objectiveProgress = get().objectiveProgress
     if (mode === 'level' && currentLevel) {
       objectiveProgress = computeObjectiveProgress(
-        currentLevel.objective, previousBoard, previousScore, 0, 0, 0, get().turnCount - 1
+        currentLevel.objective, previousBoard, previousScore,
+        get().totalMerges, get().maxChainInLevel, get().frozenCleared, get().turnCount - 1
       )
     }
 
