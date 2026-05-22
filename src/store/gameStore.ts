@@ -143,7 +143,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     const newTurnCount = get().turnCount + 1
 
     let objectiveProgress = get().objectiveProgress
-    let isLevelComplete = false
+    let newIsLevelComplete = false
     let levelStars: StarResult | null = null
 
     if (mode === 'level' && currentLevel) {
@@ -156,8 +156,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         frozenCleared,
         newTurnCount
       )
-      isLevelComplete = objectiveProgress.completed
-      if (isLevelComplete) {
+      newIsLevelComplete = objectiveProgress.completed
+      if (newIsLevelComplete) {
         levelStars = calculateStars(true, get().usedPowers, newTurnCount, currentLevel.parTurns)
       }
     }
@@ -167,7 +167,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       score: newScore,
       bestScore: Math.max(newScore, bestScore),
       isGameOver: gameOver,
-      isLevelComplete,
+      isLevelComplete: newIsLevelComplete,
       previousBoard: board,
       previousScore: score,
       totalMerges: newTotalMerges,
